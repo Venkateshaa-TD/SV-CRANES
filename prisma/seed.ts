@@ -142,24 +142,98 @@ async function main() {
     {
       id: "seed-customer-skyline",
       name: "Skyline Constructions Pvt Ltd",
+      customerCode: "CUST-001",
       contactPerson: "Priya Menon",
       phone: "+91 98000 11111",
       email: "accounts@skylineconstructions.example",
+      paymentTerms: "50% advance, balance on completion",
+      defaultDueDays: 30,
     },
     {
       id: "seed-customer-metro",
       name: "Metro Infra Projects",
+      customerCode: "CUST-002",
       contactPerson: "Arjun Nair",
       phone: "+91 98000 22222",
       email: "accounts@metroinfra.example",
+      paymentTerms: "Net 45",
+      defaultDueDays: 45,
     },
   ];
 
+  const customerIdByCode = new Map<string, string>();
   for (const customer of customers) {
-    await prisma.customer.upsert({
+    const record = await prisma.customer.upsert({
       where: { id: customer.id },
-      update: { name: customer.name, contactPerson: customer.contactPerson },
+      update: {
+        name: customer.name,
+        customerCode: customer.customerCode,
+        contactPerson: customer.contactPerson,
+        paymentTerms: customer.paymentTerms,
+        defaultDueDays: customer.defaultDueDays,
+      },
       create: { ...customer, companyId: company.id },
+    });
+    customerIdByCode.set(customer.customerCode, record.id);
+  }
+
+  // One sample Phase 2 project per customer, each with a billing
+  // configuration already set up — so the Projects/Billing screens have
+  // something to show immediately after seeding, without fabricating
+  // any invoices/payments/history.
+  const skylineCustomerId = customerIdByCode.get("CUST-001");
+  const metroCustomerId = customerIdByCode.get("CUST-002");
+
+  if (skylineCustomerId) {
+    const project = await prisma.project.upsert({
+      where: { id: "seed-project-skyline-tower" },
+      update: { name: "Skyline Tower — Crane Deployment", customerId: skylineCustomerId },
+      create: {
+        id: "seed-project-skyline-tower",
+        companyId: company.id,
+        customerId: skylineCustomerId,
+        name: "Skyline Tower — Crane Deployment",
+        code: "JOB-2026-001",
+        siteLocation: "Hinjewadi, Pune",
+        status: "ACTIVE",
+        startDate: new Date("2026-01-01"),
+      },
+    });
+    await prisma.billingConfiguration.upsert({
+      where: { projectId: project.id },
+      update: {},
+      create: {
+        projectId: project.id,
+        billingType: "HOURLY",
+        baseRate: 1500,
+        minimumGuaranteedHours: 8,
+        overtimeThresholdHours: 10,
+        overtimeRate: 2000,
+        mobilisationCharge: 15000,
+        demobilisationCharge: 15000,
+        taxPercent: 18,
+      },
+    });
+  }
+
+  if (metroCustomerId) {
+    const project = await prisma.project.upsert({
+      where: { id: "seed-project-metro-flyover" },
+      update: { name: "Metro Flyover — Support Vehicles", customerId: metroCustomerId },
+      create: {
+        id: "seed-project-metro-flyover",
+        companyId: company.id,
+        customerId: metroCustomerId,
+        name: "Metro Flyover — Support Vehicles",
+        code: "JOB-2026-002",
+        siteLocation: "Wagholi, Pune",
+        status: "UPCOMING",
+      },
+    });
+    await prisma.billingConfiguration.upsert({
+      where: { projectId: project.id },
+      update: {},
+      create: { projectId: project.id, billingType: "MONTHLY", baseRate: 250000, taxPercent: 18 },
     });
   }
 

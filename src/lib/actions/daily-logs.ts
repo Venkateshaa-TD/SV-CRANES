@@ -19,6 +19,7 @@ import {
   validateMeterReadings,
 } from "@/lib/business/daily-log";
 import { isAfterBusinessToday } from "@/lib/business/business-time";
+import { assertPeriodNotLocked } from "@/lib/data/period-lock";
 import { ActionInputError, ok, toActionError, type ActionResult } from "./action-result";
 
 /**
@@ -213,6 +214,7 @@ export async function createDailyLog(input: unknown): Promise<ActionResult<{ id:
   try {
     const actor = await requireCurrentUser();
     const resolved = await resolveInput(input, actor);
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: resolved.logDate, entityType: "DailyLog", action: "dailyLog.create" });
 
     validateMeterReadings(resolved);
     const workingHours = computeWorkingHours(resolved.startHourMeter, resolved.endHourMeter);
@@ -321,6 +323,14 @@ export async function updateDailyLog(logId: string, input: unknown): Promise<Act
     const resolved = await resolveInput(input, actor);
     // Editing to a different operator still requires DAILY_LOG_APPROVE,
     // enforced inside resolveInput via canActForOthers.
+
+    // Both the log's existing date and its (possibly changed) new date
+    // must be in an open period — blocks editing a log that already
+    // sits in a closed month, and blocks moving a log into one.
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: existing.logDate, entityType: "DailyLog", entityId: logId, action: "dailyLog.update" });
+    if (resolved.logDate.getTime() !== existing.logDate.getTime()) {
+      await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: resolved.logDate, entityType: "DailyLog", entityId: logId, action: "dailyLog.update" });
+    }
 
     validateMeterReadings(resolved);
     const workingHours = computeWorkingHours(resolved.startHourMeter, resolved.endHourMeter);

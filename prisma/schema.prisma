@@ -88,6 +88,33 @@ enum PaymentMethod {
   OTHER
 }
 
+enum BillingType {
+  HOURLY
+  DAILY
+  MONTHLY
+  FIXED
+}
+
+/// Workflow status for a BillingDraft: Operational Data -> Billing
+/// Calculation -> DRAFT -> REVIEW -> APPROVED -> Invoice Generation
+/// (INVOICED). REJECTED is a terminal dead-end requiring a new draft.
+enum BillingDraftStatus {
+  DRAFT
+  REVIEW
+  APPROVED
+  REJECTED
+  INVOICED
+}
+
+/// DEBIT increases a customer's outstanding balance (a manual charge);
+/// CREDIT decreases it (a manual write-off/discount, or issuing credit for
+/// an overpayment). Never a raw balance edit — always signed, reasoned,
+/// and audited. See LedgerAdjustment.
+enum LedgerAdjustmentType {
+  DEBIT
+  CREDIT
+}
+
 enum MaintenanceType {
   SCHEDULED
   BREAKDOWN
@@ -140,6 +167,10 @@ model Company {
   invoices          Invoice[]
   payments          Payment[]
   auditLogs         AuditLog[]
+  billingDrafts     BillingDraft[]
+  invoiceSequences  InvoiceSequence[]
+  ledgerAdjustments LedgerAdjustment[]
+  closingPeriods    ClosingPeriod[]
 }
 
 // =========================================================================
@@ -181,6 +212,13 @@ model User {
   /// Vehicles this operator is the current primary assignee for. Assigned
   /// from the vehicle side (Vehicle.assignedOperatorId) — not editable here.
   assignedVehicles  Vehicle[]          @relation("VehicleAssignedOperator")
+  reviewedBillingDrafts    BillingDraft[]     @relation("BillingDraftReviewedBy")
+  approvedInvoices         Invoice[]          @relation("InvoiceApprovedBy")
+  cancelledInvoices        Invoice[]          @relation("InvoiceCancelledBy")
+  cancelledPayments        Payment[]          @relation("PaymentCancelledBy")
+  createdLedgerAdjustments LedgerAdjustment[] @relation("LedgerAdjustmentCreatedBy")
+  closedClosingPeriods     ClosingPeriod[]    @relation("ClosingPeriodClosedBy")
+  reopenedClosingPeriods   ClosingPeriod[]    @relation("ClosingPeriodReopenedBy")
 
   @@unique([companyId, employeeCode])
   @@index([companyId])
@@ -269,11 +307,22 @@ model Customer {
   companyId     String
   company       Company   @relation(fields: [companyId], references: [id])
   name          String
+  /// Short internal customer code (e.g. "CUST-004"), unique per company
+  /// when set. Distinct from `name` — two customers may legitimately share
+  /// a display name, so name uniqueness is checked at the application
+  /// layer (active customers only), never enforced as a DB constraint.
+  customerCode  String?
   contactPerson String?
   phone         String?
   email         String?
+  /// Billing address for invoices/statements.
   address       String?
   gstNumber     String?
+  /// Free-text payment terms shown on invoices (e.g. "50% advance, balance
+  /// on completion"). Distinct from `defaultDueDays`, which drives the
+  /// actual computed due date.
+  paymentTerms   String?
+  defaultDueDays Int?      @default(30)
   notes         String?
   isActive      Boolean   @default(true)
   archivedAt    DateTime?
@@ -282,10 +331,13 @@ model Customer {
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
-  projects Project[]
-  invoices Invoice[]
-  payments Payment[]
+  projects          Project[]
+  invoices          Invoice[]
+  payments          Payment[]
+  billingDrafts     BillingDraft[]
+  ledgerAdjustments LedgerAdjustment[]
 
+  @@unique([companyId, customerCode])
   @@index([companyId])
 }
 
@@ -316,7 +368,10 @@ model Project {
   fuelEntries        FuelEntry[]
   expenses           Expense[]
   invoices           Invoice[]
+  billingConfig      BillingConfiguration?
+  billingDrafts      BillingDraft[]
 
+  @@unique([companyId, code])
   @@index([companyId])
   @@index([customerId])
   @@index([status])
@@ -383,6 +438,8 @@ model DailyLog {
   archivedAt       DateTime?
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
+
+  billingSourceLogs BillingDraftSourceLog[]
 
   // Compound indexes match the actual query shape: chronology lookups and
   // history views always filter by vehicleId/operatorId together with a
@@ -485,15 +542,42 @@ model Invoice {
   customer      Customer      @relation(fields: [customerId], references: [id])
   projectId     String?
   project       Project?      @relation(fields: [projectId], references: [id])
+  /// Set only when this invoice was generated from an approved
+  /// BillingDraft — the unique constraint is what makes duplicate
+  /// invoice generation from the same draft impossible at the DB level,
+  /// on top of the transactional status guard in the action layer.
+  billingDraftId String?      @unique
+  billingDraft   BillingDraft? @relation("BillingDraftInvoice", fields: [billingDraftId], references: [id])
   invoiceNumber String
   status        InvoiceStatus @default(DRAFT)
   issueDate     DateTime
   dueDate       DateTime?
+  /// Billing period this invoice covers, when generated from billing
+  /// (mirrors BillingDraft.periodStart/periodEnd) — null for manual
+  /// ad-hoc invoices with no associated period.
+  billingPeriodStart DateTime?
+  billingPeriodEnd   DateTime?
+  currency      String        @default("INR")
   subtotal      Decimal       @db.Decimal(12, 2) @default(0)
+  discountAmount Decimal      @db.Decimal(12, 2) @default(0)
   taxAmount     Decimal       @db.Decimal(12, 2) @default(0)
   totalAmount   Decimal       @db.Decimal(12, 2) @default(0)
+  /// Maintained aggregate of allocated payments — recomputed from
+  /// PaymentAllocation inside the same transaction on every allocation
+  /// change, never set independently. The true source of truth for
+  /// "outstanding" is always Invoice.totalAmount minus allocations,
+  /// derived at read time; this column exists only to avoid an aggregate
+  /// join on every list view.
   amountPaid    Decimal       @db.Decimal(12, 2) @default(0)
   notes         String?
+  approvedAt    DateTime?
+  approvedById  String?
+  approvedBy    User?         @relation("InvoiceApprovedBy", fields: [approvedById], references: [id])
+  sentAt        DateTime?
+  cancelledAt   DateTime?
+  cancelledById String?
+  cancelledBy   User?         @relation("InvoiceCancelledBy", fields: [cancelledById], references: [id])
+  cancellationReason String?
   createdById   String?
   updatedById   String?
   archivedAt    DateTime?
@@ -507,6 +591,7 @@ model Invoice {
   @@index([customerId])
   @@index([projectId])
   @@index([status])
+  @@index([companyId, dueDate])
 }
 
 model InvoiceLine {
@@ -518,7 +603,16 @@ model InvoiceLine {
   description String
   quantity    Decimal  @db.Decimal(10, 2) @default(1)
   unitPrice   Decimal  @db.Decimal(12, 2)
+  /// Pre-tax line total = quantity * unitPrice, snapshotted at creation —
+  /// never recomputed from current project/billing rates afterward.
   amount      Decimal  @db.Decimal(12, 2)
+  taxPercent  Decimal  @db.Decimal(5, 2) @default(0)
+  taxAmount   Decimal  @db.Decimal(12, 2) @default(0)
+  /// Where this line came from, for traceability — e.g. "BILLING_DRAFT",
+  /// "MOBILISATION", "DEMOBILISATION", "ADDITIONAL_CHARGE", "MANUAL".
+  sourceType  String?
+  sourceId    String?
+  sortOrder   Int      @default(0)
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -539,6 +633,10 @@ model Payment {
   notes           String?
   receivedById    String?
   receivedBy      User?         @relation("PaymentReceivedBy", fields: [receivedById], references: [id])
+  cancelledAt     DateTime?
+  cancelledById   String?
+  cancelledBy     User?         @relation("PaymentCancelledBy", fields: [cancelledById], references: [id])
+  cancellationReason String?
   createdById     String?
   updatedById     String?
   archivedAt      DateTime?
@@ -564,6 +662,155 @@ model PaymentAllocation {
 
   @@unique([paymentId, invoiceId])
   @@index([invoiceId])
+}
+
+/// Concurrency-safe invoice number counter, one row per company per
+/// fiscal year (Indian FY: April-March; see src/lib/business/invoice.ts).
+/// Numbers are issued via an atomic `INSERT ... ON CONFLICT DO UPDATE
+/// SET lastNumber = lastNumber + 1 RETURNING lastNumber` — never read
+/// then written as two steps, and never generated client-side.
+model InvoiceSequence {
+  companyId  String
+  company    Company @relation(fields: [companyId], references: [id])
+  fiscalYear Int
+  lastNumber Int     @default(0)
+
+  @@id([companyId, fiscalYear])
+}
+
+/// A project's billing terms. Mutable — editing it changes how FUTURE
+/// billing drafts are calculated, but every past BillingDraft/Invoice has
+/// already snapshotted its own rate/quantity/amounts, so a rate change
+/// here never rewrites billing history.
+model BillingConfiguration {
+  id                     String      @id @default(cuid())
+  projectId              String      @unique
+  project                Project     @relation(fields: [projectId], references: [id])
+  billingType            BillingType
+  /// Per-hour / per-day / per-month rate, or the agreed lump sum for FIXED.
+  baseRate               Decimal     @db.Decimal(12, 2)
+  /// HOURLY only: if a day's actual working hours are below this, that
+  /// day is still billed for this many hours.
+  minimumGuaranteedHours Decimal?    @db.Decimal(6, 2)
+  /// HOURLY only: hours worked beyond this many in a single day are
+  /// billed at overtimeRate instead of baseRate. Both must be set
+  /// together for overtime to apply.
+  overtimeThresholdHours Decimal?    @db.Decimal(6, 2)
+  overtimeRate           Decimal?    @db.Decimal(12, 2)
+  mobilisationCharge     Decimal?    @db.Decimal(12, 2)
+  demobilisationCharge   Decimal?    @db.Decimal(12, 2)
+  taxPercent             Decimal     @db.Decimal(5, 2) @default(0)
+  billingNotes           String?
+  createdById            String?
+  updatedById            String?
+  createdAt              DateTime    @default(now())
+  updatedAt              DateTime    @updatedAt
+}
+
+/// Billing Preparation / Billing Draft: the reviewable, approvable
+/// staging record between raw operational data and an issued Invoice.
+/// Every field here is a snapshot taken at calculation/approval time —
+/// generating the eventual Invoice copies these values verbatim rather
+/// than re-deriving them from the (possibly since-changed) project/
+/// billing configuration.
+model BillingDraft {
+  id             String             @id @default(cuid())
+  companyId      String
+  company        Company            @relation(fields: [companyId], references: [id])
+  projectId      String
+  project        Project            @relation(fields: [projectId], references: [id])
+  customerId     String
+  customer       Customer           @relation(fields: [customerId], references: [id])
+  billingType    BillingType
+  periodStart    DateTime
+  periodEnd      DateTime
+  status         BillingDraftStatus @default(DRAFT)
+  /// Hours (HOURLY), eligible days (DAILY), or 1 (MONTHLY/FIXED).
+  quantity       Decimal            @db.Decimal(12, 2)
+  rate           Decimal            @db.Decimal(12, 2)
+  baseAmount     Decimal            @db.Decimal(12, 2)
+  additionalChargesAmount Decimal   @db.Decimal(12, 2) @default(0)
+  taxPercent     Decimal            @db.Decimal(5, 2) @default(0)
+  taxAmount      Decimal            @db.Decimal(12, 2) @default(0)
+  totalAmount    Decimal            @db.Decimal(12, 2)
+  /// Full calculation breakdown (normal/overtime hours, minimum-guarantee
+  /// application, eligible-day list, etc.) — kept for drill-down/audit
+  /// even though the summary fields above are also persisted directly.
+  calculationDetail Json?
+  notes          String?
+  /// Set on both approval and rejection — "reviewed by/at", matching the
+  /// Expense.approvedBy convention elsewhere in this codebase.
+  reviewNote     String?
+  reviewedById   String?
+  reviewedBy     User?              @relation("BillingDraftReviewedBy", fields: [reviewedById], references: [id])
+  reviewedAt     DateTime?
+  createdById    String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  charges    BillingDraftCharge[]
+  sourceLogs BillingDraftSourceLog[]
+  invoice    Invoice?                @relation("BillingDraftInvoice")
+
+  @@index([companyId])
+  @@index([projectId])
+  @@index([customerId])
+  @@index([status])
+}
+
+/// Ad-hoc charges added during billing review (mobilisation,
+/// demobilisation, other approved extras) — distinct from the recurring
+/// rate captured in baseAmount.
+model BillingDraftCharge {
+  id             String       @id @default(cuid())
+  billingDraftId String
+  billingDraft   BillingDraft @relation(fields: [billingDraftId], references: [id], onDelete: Cascade)
+  description    String
+  amount         Decimal      @db.Decimal(12, 2)
+  createdAt      DateTime     @default(now())
+
+  @@index([billingDraftId])
+}
+
+/// Links a BillingDraft to the specific DailyLog rows its HOURLY/DAILY
+/// calculation was derived from, so a reviewer can drill down into the
+/// exact source records rather than trusting an opaque total.
+model BillingDraftSourceLog {
+  id             String       @id @default(cuid())
+  billingDraftId String
+  billingDraft   BillingDraft @relation(fields: [billingDraftId], references: [id], onDelete: Cascade)
+  dailyLogId     String
+  dailyLog       DailyLog     @relation(fields: [dailyLogId], references: [id])
+  /// HOURLY: the billable hours counted from this log (after minimum-
+  /// guarantee/overtime rules). DAILY: null — the log simply marks the
+  /// day as eligible.
+  hoursCounted   Decimal?     @db.Decimal(6, 2)
+  createdAt      DateTime     @default(now())
+
+  @@unique([billingDraftId, dailyLogId])
+  @@index([dailyLogId])
+}
+
+/// An explicit, authorized correction to a customer's derived balance —
+/// e.g. a write-off or a manually-issued credit. Never a raw balance
+/// edit: always signed (DEBIT/CREDIT), reasoned, attributed, and audited.
+/// Included as one more line in the customer ledger alongside invoices
+/// and payments (see src/lib/business/ledger.ts).
+model LedgerAdjustment {
+  id          String               @id @default(cuid())
+  companyId   String
+  company     Company              @relation(fields: [companyId], references: [id])
+  customerId  String
+  customer    Customer             @relation(fields: [customerId], references: [id])
+  type        LedgerAdjustmentType
+  amount      Decimal              @db.Decimal(12, 2)
+  reason      String
+  createdById String
+  createdBy   User                 @relation("LedgerAdjustmentCreatedBy", fields: [createdById], references: [id])
+  createdAt   DateTime             @default(now())
+
+  @@index([companyId])
+  @@index([customerId])
 }
 
 // =========================================================================
@@ -643,6 +890,63 @@ model FileAsset {
   expenseReceipts      Expense[]        @relation("ExpenseReceipt")
 
   @@index([uploadedById])
+}
+
+// =========================================================================
+// MONTHLY CLOSING / PERIOD LOCKS (Phase 2.5)
+// =========================================================================
+
+/// OPEN -> REVIEW -> CLOSED -> REOPENED -> (REVIEW or CLOSED again). See
+/// src/lib/business/closing-period.ts for the exact transition rules.
+/// REOPENED behaves like OPEN for lock-enforcement purposes (see
+/// src/lib/data/period-lock.ts) — only CLOSED blocks mutations.
+enum ClosingPeriodStatus {
+  OPEN
+  REVIEW
+  CLOSED
+  REOPENED
+}
+
+/// One row per company per accounting month. Its existence (or absence)
+/// is the single source of truth for whether records dated within
+/// [startDate, endDate] may be mutated — see
+/// src/lib/data/period-lock.ts#assertPeriodNotLocked, which every
+/// date-bearing financial/operational mutation (DailyLog, FuelEntry,
+/// Expense, Invoice, Payment, PaymentAllocation) calls before writing.
+/// A month with no ClosingPeriod row is implicitly OPEN/unlocked.
+model ClosingPeriod {
+  id         String              @id @default(cuid())
+  companyId  String
+  company    Company             @relation(fields: [companyId], references: [id])
+  year       Int
+  /// 1-12, business-timezone (Asia/Kolkata) calendar month.
+  month      Int
+  /// Both boundaries are plain calendar-date instants (UTC midnight of
+  /// the 1st, and 23:59:59.999 of the last day) — matching how every
+  /// date-only field this locks against (DailyLog.logDate,
+  /// Invoice.issueDate, etc.) is itself stored. See
+  /// src/lib/business/business-time.ts#calendarMonthRange.
+  startDate  DateTime
+  endDate    DateTime
+  status     ClosingPeriodStatus @default(OPEN)
+  notes      String?
+  /// Required when closing despite outstanding (non-blocking) warnings;
+  /// null when the month closed with a clean checklist.
+  overrideReason String?
+  closedAt     DateTime?
+  closedById   String?
+  closedBy     User?     @relation("ClosingPeriodClosedBy", fields: [closedById], references: [id])
+  reopenedAt   DateTime?
+  reopenedById String?
+  reopenedBy   User?     @relation("ClosingPeriodReopenedBy", fields: [reopenedById], references: [id])
+  /// Required every time the period is reopened — never automatic.
+  reopenReason String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  @@unique([companyId, year, month])
+  @@index([companyId, status])
+  @@index([companyId, startDate, endDate])
 }
 
 // =========================================================================

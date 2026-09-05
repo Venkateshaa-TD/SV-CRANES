@@ -20,6 +20,7 @@ import {
   ShieldCheck,
   History,
   Settings,
+  CalendarCheck,
   type LucideIcon,
 } from "lucide-react";
 import type { NavIconKey } from "@/lib/navigation";
@@ -46,6 +47,7 @@ export const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
   "credit-card": CreditCard,
   landmark: Landmark,
   "book-open": BookOpen,
+  "calendar-check": CalendarCheck,
   wrench: Wrench,
   "bar-chart": BarChart3,
   "check-square": CheckSquare,

@@ -23,6 +23,7 @@ export type NavIconKey =
   | "credit-card"
   | "landmark"
   | "book-open"
+  | "calendar-check"
   | "wrench"
   | "bar-chart"
   | "check-square"
@@ -151,6 +152,12 @@ export const NAV_GROUPS: NavGroup[] = [
         href: "/finance/ledger",
         iconKey: "book-open",
         permission: PERMISSIONS.FINANCE_LEDGER_VIEW,
+      },
+      {
+        label: "Month Closing",
+        href: "/finance/closing",
+        iconKey: "calendar-check",
+        permission: PERMISSIONS.CLOSING_VIEW,
       },
     ],
   },

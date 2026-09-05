@@ -36,3 +36,36 @@ export async function listActiveExpenseCategoryOptions(companyId: string) {
     orderBy: { name: "asc" },
   });
 }
+
+export async function listActiveCustomerOptions(companyId: string) {
+  return prisma.customer.findMany({
+    where: { companyId, archivedAt: null },
+    select: { id: true, name: true, customerCode: true },
+    orderBy: { name: "asc" },
+  });
+}
+
+/** Vehicles not already carrying an open-ended (currently active)
+ * assignment to some other project — the practical pool available to
+ * assign next. A vehicle whose only assignments are closed (assignedTo
+ * set) is still offered here. */
+export async function listAssignableVehicleOptions(companyId: string) {
+  const vehicles = await prisma.vehicle.findMany({
+    where: { companyId, archivedAt: null },
+    select: {
+      id: true,
+      name: true,
+      code: true,
+      registrationNumber: true,
+      projectAssignments: { where: { assignedTo: null }, select: { projectId: true }, take: 1 },
+    },
+    orderBy: { name: "asc" },
+  });
+  return vehicles.map((v) => ({
+    id: v.id,
+    name: v.name,
+    code: v.code,
+    registrationNumber: v.registrationNumber,
+    currentlyAssigned: v.projectAssignments.length > 0,
+  }));
+}

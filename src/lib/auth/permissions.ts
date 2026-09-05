@@ -63,6 +63,14 @@ export const PERMISSIONS = {
   ADMIN_USERS_MANAGE: "admin:users:manage",
   ADMIN_AUDIT_VIEW: "admin:audit:view",
   ADMIN_SETTINGS_MANAGE: "admin:settings:manage",
+
+  CLOSING_VIEW: "closing:view",
+  /** Run validation, resolve/override warnings, and close a month. */
+  CLOSING_MANAGE: "closing:manage",
+  /** Narrow override, same pattern as CUSTOMER_FINANCIAL_EDIT: reopening
+   *  a closed month is deliberately NOT part of CLOSING_MANAGE — it must
+   *  be granted individually via UserPermission regardless of role. */
+  CLOSING_REOPEN: "closing:reopen",
 } as const;
 
 export type Permission = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -109,6 +117,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     PERMISSIONS.REPORT_VIEW,
     PERMISSIONS.APPROVALS_VIEW,
     PERMISSIONS.NOTIFICATION_VIEW,
+    PERMISSIONS.CLOSING_VIEW,
+    PERMISSIONS.CLOSING_MANAGE,
   ],
 
   ACCOUNTANT: [
@@ -129,6 +139,8 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     PERMISSIONS.FINANCE_LEDGER_VIEW,
     PERMISSIONS.REPORT_VIEW,
     PERMISSIONS.NOTIFICATION_VIEW,
+    PERMISSIONS.CLOSING_VIEW,
+    PERMISSIONS.CLOSING_MANAGE,
   ],
 
   SUPERVISOR: [

@@ -10,6 +10,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { recordAudit } from "@/lib/audit/audit";
 import { expenseFormSchema, expenseReviewSchema } from "@/lib/validation/expense";
 import { validateExpenseAmount, validateRejectionReason } from "@/lib/business/expense";
+import { assertPeriodNotLocked } from "@/lib/data/period-lock";
 import { ok, toActionError, type ActionResult } from "./action-result";
 
 export async function submitExpense(input: unknown): Promise<ActionResult<{ id: string }>> {
@@ -38,6 +39,7 @@ export async function submitExpense(input: unknown): Promise<ActionResult<{ id: 
     if (Number.isNaN(expenseDate.getTime())) {
       return { success: false, fieldErrors: { expenseDate: "Enter a valid date." } };
     }
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: expenseDate, entityType: "Expense", action: "expense.submit" });
 
     const expense = await prisma.expense.create({
       data: {
@@ -90,6 +92,8 @@ export async function reviewExpense(input: unknown): Promise<ActionResult> {
     if (expense.status !== "PENDING") {
       return { success: false, message: `This expense is already ${expense.status.toLowerCase()}.` };
     }
+
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: expense.expenseDate, entityType: "Expense", entityId: expense.id, action: "expense.review" });
 
     if (data.decision === "REJECTED") {
       validateRejectionReason(data.reviewNote);
@@ -170,6 +174,10 @@ export async function updateExpense(expenseId: string, input: unknown): Promise<
     const expenseDate = new Date(data.expenseDate);
     if (Number.isNaN(expenseDate.getTime())) {
       return { success: false, fieldErrors: { expenseDate: "Enter a valid date." } };
+    }
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: before.expenseDate, entityType: "Expense", entityId: expenseId, action: "expense.update" });
+    if (expenseDate.getTime() !== before.expenseDate.getTime()) {
+      await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: expenseDate, entityType: "Expense", entityId: expenseId, action: "expense.update" });
     }
 
     const updated = await prisma.expense.update({

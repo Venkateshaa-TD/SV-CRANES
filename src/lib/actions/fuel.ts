@@ -9,6 +9,7 @@ import { PERMISSIONS } from "@/lib/auth/permissions";
 import { recordAudit } from "@/lib/audit/audit";
 import { fuelFormSchema } from "@/lib/validation/fuel";
 import { computeFuelTotal, isSuspiciousFuelQuantity, validateFuelQuantities } from "@/lib/business/fuel";
+import { assertPeriodNotLocked } from "@/lib/data/period-lock";
 import { ActionInputError, ok, toActionError, type ActionResult } from "./action-result";
 
 function decimalOrNull(value: string | undefined): Prisma.Decimal | null {
@@ -59,6 +60,7 @@ export async function createFuelEntry(input: unknown): Promise<ActionResult<{ id
   try {
     const actor = await requireCurrentUserWithPermission(PERMISSIONS.FUEL_CREATE);
     const resolved = await resolveFuelInput(input, actor.companyId);
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: resolved.entryDate, entityType: "FuelEntry", action: "fuelEntry.create" });
 
     const entry = await prisma.fuelEntry.create({
       data: { ...resolved, createdById: actor.id, updatedById: actor.id },
@@ -99,6 +101,10 @@ export async function updateFuelEntry(entryId: string, input: unknown): Promise<
     if (!before) return { success: false, message: "Fuel entry not found." };
 
     const resolved = await resolveFuelInput(input, actor.companyId);
+    await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: before.entryDate, entityType: "FuelEntry", entityId: entryId, action: "fuelEntry.update" });
+    if (resolved.entryDate.getTime() !== before.entryDate.getTime()) {
+      await assertPeriodNotLocked({ companyId: actor.companyId, actorId: actor.id, date: resolved.entryDate, entityType: "FuelEntry", entityId: entryId, action: "fuelEntry.update" });
+    }
 
     const entry = await prisma.fuelEntry.update({
       where: { id: entryId },

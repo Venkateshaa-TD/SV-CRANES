@@ -4,6 +4,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const expenseFindFirstMock = vi.fn();
 const expenseUpdateManyMock = vi.fn();
 const userPermissionFindManyMock = vi.fn();
+const closingPeriodFindFirstMock = vi.fn();
 const requireCurrentUserWithPermissionMock = vi.fn();
 
 vi.mock("@/lib/db/prisma", () => ({
@@ -13,6 +14,10 @@ vi.mock("@/lib/db/prisma", () => ({
       updateMany: (...args: unknown[]) => expenseUpdateManyMock(...args),
     },
     userPermission: { findMany: (...args: unknown[]) => userPermissionFindManyMock(...args) },
+    // Not under test here — reviewExpense also asserts the month isn't
+    // closed (see period-lock-enforcement.test.ts for that behavior);
+    // null keeps every period implicitly OPEN so it never interferes.
+    closingPeriod: { findFirst: (...args: unknown[]) => closingPeriodFindFirstMock(...args) },
   },
 }));
 
@@ -32,6 +37,7 @@ beforeEach(() => {
   expenseFindFirstMock.mockReset();
   expenseUpdateManyMock.mockReset();
   userPermissionFindManyMock.mockReset().mockResolvedValue([]);
+  closingPeriodFindFirstMock.mockReset().mockResolvedValue(null);
   requireCurrentUserWithPermissionMock.mockReset().mockResolvedValue(MANAGER);
 });
 

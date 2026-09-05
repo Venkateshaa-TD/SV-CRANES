@@ -20,13 +20,13 @@ const businessDatePartsFormatter = new Intl.DateTimeFormat("en-CA", {
   day: "2-digit",
 });
 
-interface DateParts {
+export interface DateParts {
   year: number;
   month: number; // 1-12
   day: number;
 }
 
-function businessLocalDateParts(date: Date): DateParts {
+export function businessLocalDateParts(date: Date): DateParts {
   const parts = businessDatePartsFormatter.formatToParts(date);
   const map = Object.fromEntries(parts.filter((p) => p.type !== "literal").map((p) => [p.type, p.value]));
   return { year: Number(map.year), month: Number(map.month), day: Number(map.day) };
@@ -74,4 +74,51 @@ export function startOfNextBusinessDay(date: Date = new Date()): Date {
  * server clock in a different timezone. */
 export function isAfterBusinessToday(date: Date, now: Date = new Date()): boolean {
   return date.getTime() >= startOfNextBusinessDay(now).getTime();
+}
+
+/** A stable "YYYY-MM-DD" key for the business-local calendar date of
+ * `date` — used to deduplicate records onto distinct calendar days (e.g.
+ * DAILY billing's eligible-day count) regardless of what time of day
+ * each record's timestamp carries. */
+export function businessDateKey(date: Date): string {
+  const { year, month, day } = businessLocalDateParts(date);
+  return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/** True when [periodStart, periodEnd] (both business-midnight instants)
+ * exactly span one full calendar month — used by MONTHLY billing to
+ * decide whether proration is even a question. */
+export function isFullBusinessCalendarMonth(periodStart: Date, periodEnd: Date): boolean {
+  const start = businessLocalDateParts(periodStart);
+  const end = businessLocalDateParts(periodEnd);
+  if (start.year !== end.year || start.month !== end.month) return false;
+  if (start.day !== 1) return false;
+  const lastDayOfMonth = new Date(Date.UTC(start.year, start.month, 0)).getUTCDate();
+  return end.day === lastDayOfMonth;
+}
+
+export function businessDaysInMonth(date: Date): number {
+  const { year, month } = businessLocalDateParts(date);
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+/**
+ * The [startDate, endDate] boundaries (both inclusive) for a given
+ * business-calendar (year, month), for month-closing period locks and
+ * checklist queries. Deliberately plain UTC-midnight calendar arithmetic
+ * — NOT offset by BUSINESS_UTC_OFFSET_MS like startOfBusinessMonth above
+ * — because every date-only field this is compared against (DailyLog.
+ * logDate, FuelEntry.entryDate, Expense.expenseDate, Invoice.issueDate,
+ * Payment.paymentDate, BillingDraft.periodStart/End) is itself stored as
+ * a plain UTC-midnight instant of its calendar-date string (see
+ * src/lib/actions/daily-logs.ts and billing-drafts.ts for the same
+ * convention). Using the IST-offset "true instant" boundary here would
+ * misalign by 5.5 hours and silently exclude the first/last day's
+ * records from range queries.
+ */
+export function calendarMonthRange(year: number, month1to12: number): { startDate: Date; endDate: Date } {
+  return {
+    startDate: new Date(Date.UTC(year, month1to12 - 1, 1, 0, 0, 0, 0)),
+    endDate: new Date(Date.UTC(year, month1to12, 0, 23, 59, 59, 999)),
+  };
 }
